@@ -63,12 +63,14 @@ class RotatingProxyMiddleware(object):
     * ``ROTATING_PROXY_BACKOFF_CAP`` - backoff time cap, in seconds.
       Default is 3600 (i.e. 60 min).
     """
-    def __init__(self, proxy_list, logstats_interval, stop_if_no_proxies,
+    def __init__(self, proxy_list, mw_enabled, use_dl_slot, logstats_interval, stop_if_no_proxies,
                  max_proxies_to_try, backoff_base, backoff_cap, crawler):
 
         backoff = partial(exp_backoff_full_jitter, base=backoff_base, cap=backoff_cap)
         self.proxies = Proxies(self.cleanup_proxy_list(proxy_list),
                                backoff=backoff)
+        self.mw_enabled = mw_enabled
+        self.use_dl_slot = use_dl_slot
         self.logstats_interval = logstats_interval
         self.reanimate_interval = 5
         self.stop_if_no_proxies = stop_if_no_proxies
@@ -91,6 +93,8 @@ class RotatingProxyMiddleware(object):
             raise NotConfigured()
         mw = cls(
             proxy_list=proxy_list,
+            mw_enabled=s.getbool('ROTATING_PROXY_ENABLED', True),
+            use_dl_slot=s.getbool('ROTATING_PROXY_DELAY_PER_PROXY', True),
             logstats_interval=s.getfloat('ROTATING_PROXY_LOGSTATS_INTERVAL', 30),
             stop_if_no_proxies=s.getbool('ROTATING_PROXY_CLOSE_SPIDER', False),
             max_proxies_to_try=s.getint('ROTATING_PROXY_PAGE_RETRY_TIMES', 5),
@@ -105,13 +109,14 @@ class RotatingProxyMiddleware(object):
         return mw
 
     def engine_started(self):
-        if self.logstats_interval:
-            self.log_task = task.LoopingCall(self.log_stats)
-            self.log_task.start(self.logstats_interval, now=True)
+        if self.mw_enabled:
+            if self.logstats_interval:
+                self.log_task = task.LoopingCall(self.log_stats)
+                self.log_task.start(self.logstats_interval, now=True)
 
-        if self.reanimate_interval:
-            self.reanimate_task = task.LoopingCall(self.reanimate_proxies)
-            self.reanimate_task.start(self.reanimate_interval, now=False)
+            if self.reanimate_interval:
+                self.reanimate_task = task.LoopingCall(self.reanimate_proxies)
+                self.reanimate_task.start(self.reanimate_interval, now=False)
 
     def reanimate_proxies(self):
         n_reanimated = self.proxies.reanimate()
@@ -127,7 +132,7 @@ class RotatingProxyMiddleware(object):
             self.reanimate_task.stop()
 
     def process_request(self, request, spider):
-        if 'proxy' in request.meta and not request.meta.get('_rotating_proxy'):
+        if not self.mw_enabled or ( 'proxy' in request.meta and not request.meta.get('_rotating_proxy') ):
             return
         proxy = self.proxies.get_random()
         if not proxy:
@@ -143,8 +148,8 @@ class RotatingProxyMiddleware(object):
                     raise CloseSpider("no_proxies_after_reset")
 
         request.meta['proxy'] = proxy
-        # not needed. We want concurrency and delay as usual per target domain:
-        # request.meta['download_slot'] = self.get_proxy_slot(proxy)
+        if self.use_dl_slot:
+            request.meta['download_slot'] = self.get_proxy_slot(proxy)
         request.meta['_rotating_proxy'] = True
 
     def get_proxy_slot(self, proxy):
