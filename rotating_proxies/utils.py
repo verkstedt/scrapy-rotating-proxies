@@ -1,6 +1,6 @@
 from __future__ import absolute_import
 try:
-    from urllib2 import _parse_proxy
+    from urllib import _parse_proxy
 except ImportError:
     from urllib.request import _parse_proxy
 
